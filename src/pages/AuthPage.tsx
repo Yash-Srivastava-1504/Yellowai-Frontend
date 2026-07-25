@@ -148,8 +148,8 @@ export default function AuthPage() {
         >
           <div className="text-center mb-8">
             <Link to="/" className="flex items-center justify-center gap-2 text-lg font-bold tracking-tight text-foreground">
-              <img src={Logo} alt="Manah" className="h-9 w-auto drop-shadow-sm" />
-              Manah
+              <img src={Logo} alt="AgentForge" className="h-9 w-auto drop-shadow-sm" />
+              AgentForge
             </Link>
             <p className="mt-2 text-sm text-muted-foreground">Sign in to continue your journey</p>
           </div>
