@@ -1,20 +1,20 @@
 import { useState, useRef, useEffect, useCallback, useReducer } from "react";
 import { flushSync } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowLeft, Send, Mic, Phone, AlertTriangle } from "lucide-react";
-import { Link } from "react-router-dom";
+import { ArrowLeft, Send, Bot, Loader2, AlertCircle } from "lucide-react";
+import { Link, useParams, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { companions, getAIResponseForCompanion, getStoredCompanion } from "@/lib/companion";
 import { useAuth } from "@/contexts/AuthContext";
-import { useCompanionType } from "@/hooks/useCompanionType";
 import { getSupabase } from "@/lib/supabase";
-import { type ChatHistoryItem, getApiBaseUrl, streamCompanionReply } from "@/lib/companionApi";
+import { getApiBaseUrl, streamProjectReply, type ChatHistoryItem } from "@/lib/chatApi";
 import {
   fetchConversationMessagesAsc,
-  getLatestOrCreateConversation,
+  fetchProject,
+  getOrCreateProjectConversation,
   insertConversationMessageRow,
   toQueryError,
 } from "@/lib/userData";
+import type { ProjectRow } from "@/lib/database.types";
 
 interface Message {
   id: string;
@@ -23,64 +23,58 @@ interface Message {
   time: string;
 }
 
-const quickReplies = ["I'm stressed about exams 📚", "Feeling low today 😔", "Just need to talk 💬", "Give me an exercise 🧘"];
-
-const crisisKeywords = ["suicide", "kill myself", "end my life", "self harm", "want to die", "no reason to live"];
-
-function detectCrisis(text: string): boolean {
-  return crisisKeywords.some((kw) => text.toLowerCase().includes(kw));
-}
+const quickReplies = [
+  "Help me brainstorm ideas 💡",
+  "Summarize this topic 📝",
+  "Explain step by step 🔍",
+  "Give me feedback 📊",
+];
 
 function formatMsgTime(iso?: string) {
   const d = iso ? new Date(iso) : new Date();
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-function normalizeLanguage(lang: string | null | undefined): string {
-  if (lang === "en" || lang === "hi" || lang === "hinglish") return lang;
-  return "hinglish";
-}
-
-function chatStorageErrorMessage(e: unknown, fallback: string): string {
-  const err = toQueryError(e);
-  const missing =
-    err.message.includes("conversations") ||
-    err.message.includes("public.messages") ||
-    err.message.includes("chat_sessions") ||
-    err.message.includes("chat_messages") ||
-    (err.message.includes("PGRST205") && /chat|conversation|messages/i.test(err.message));
-  if (missing) {
-    return "Chat tables are missing. In Supabase SQL Editor run supabase/conversations-messages.sql, wait ~10s, refresh.";
-  }
-  return err.message || fallback;
-}
-
 function buildApiThread(msgs: Message[]): ChatHistoryItem[] {
   return msgs
-    .filter((m) => m.id !== "greeting")
+    .filter((m) => m.id !== "welcome")
     .map((m) => ({
       role: m.role === "user" ? ("user" as const) : ("assistant" as const),
       content: m.text,
     }));
 }
 
-export default function ChatPage() {
-  const companionType = useCompanionType();
-  const info = companions[companionType];
-  const { user, profile } = useAuth();
+function chatErrorMessage(e: unknown): string {
+  const err = toQueryError(e);
+  if (
+    err.message.includes("conversations") ||
+    err.message.includes("messages") ||
+    err.message.includes("PGRST205")
+  ) {
+    return "Chat tables are missing. Run supabase/projects-prompts-migration.sql in Supabase SQL Editor.";
+  }
+  return err.message || "An error occurred";
+}
 
+export default function ChatPage() {
+  const { id: projectId } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const navigate = useNavigate();
+
+  const [project, setProject] = useState<ProjectRow | null>(null);
+  const [projectLoading, setProjectLoading] = useState(true);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [chatReady, setChatReady] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
-  const [showCrisis, setShowCrisis] = useState(false);
+
   const bottomRef = useRef<HTMLDivElement>(null);
   const conversationRef = useRef<string | null>(null);
   const messagesRef = useRef<Message[]>([]);
   conversationRef.current = conversationId;
 
-  /** Streaming UI: refs hold text (no batching loss); pump forces sync paint each chunk. */
+  /** Streaming UI state */
   const streamBufRef = useRef("");
   const streamTimeRef = useRef("");
   const streamShowRef = useRef(false);
@@ -94,22 +88,50 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isTyping, streamPaintGen]);
 
-  // Only re-load when user changes. Do NOT depend on companion/greeting — when profile loads,
-  // `info.greeting` changes and was re-running this effect, replacing `messages` mid-stream so the reply vanished until refresh.
+  // Load project metadata
   useEffect(() => {
+    if (!projectId) return;
+    const client = getSupabase();
+    if (!client) return;
+    fetchProject(client, projectId)
+      .then((p) => {
+        if (!p) {
+          toast.error("Project not found.");
+          navigate("/projects");
+          return;
+        }
+        setProject(p);
+      })
+      .catch((e) => {
+        toast.error(toQueryError(e).message);
+        navigate("/projects");
+      })
+      .finally(() => setProjectLoading(false));
+  }, [projectId, navigate]);
+
+  // Load conversation history
+  useEffect(() => {
+    if (!user || !projectId || projectLoading) return;
     let cancelled = false;
-    const greetingText = companions[getStoredCompanion()].greeting;
+    const client = getSupabase();
+    if (!client) return;
+
     (async () => {
-      const client = getSupabase();
-      if (!client || !user) return;
       try {
-        const conv = await getLatestOrCreateConversation(client, user.id);
+        const conv = await getOrCreateProjectConversation(client, user.id, projectId);
         if (cancelled) return;
         setConversationId(conv.id);
         const rows = await fetchConversationMessagesAsc(client, conv.id);
         if (cancelled) return;
         if (rows.length === 0) {
-          setMessages([{ id: "greeting", role: "ai", text: greetingText, time: "Now" }]);
+          setMessages([
+            {
+              id: "welcome",
+              role: "ai",
+              text: "Hello! I'm ready to help. What would you like to discuss?",
+              time: "Now",
+            },
+          ]);
         } else {
           setMessages(
             rows.map((m) => ({
@@ -122,8 +144,15 @@ export default function ChatPage() {
         }
       } catch (e) {
         console.error(e);
-        toast.error(chatStorageErrorMessage(e, "Could not load chat"));
-        setMessages([{ id: "greeting", role: "ai", text: greetingText, time: "Now" }]);
+        toast.error(chatErrorMessage(e));
+        setMessages([
+          {
+            id: "welcome",
+            role: "ai",
+            text: "Hello! I'm ready to help. What would you like to discuss?",
+            time: "Now",
+          },
+        ]);
       } finally {
         if (!cancelled) setChatReady(true);
       }
@@ -131,11 +160,11 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, projectId, projectLoading]);
 
   const sendMessage = useCallback(
     async (text: string) => {
-      if (!text.trim() || !chatReady) return;
+      if (!text.trim() || !chatReady || !projectId) return;
       const trimmed = text.trim();
       const convId = conversationRef.current;
       const client = getSupabase();
@@ -157,28 +186,21 @@ export default function ChatPage() {
         return;
       }
 
-      // If conversation wasn't initialised on mount (e.g. tables created after load), retry now.
       let activeConvId = convId;
       if (!activeConvId) {
         try {
-          const conv = await getLatestOrCreateConversation(client, user!.id);
+          const conv = await getOrCreateProjectConversation(client, user!.id, projectId);
           setConversationId(conv.id);
           activeConvId = conv.id;
         } catch (e) {
-          toast.error(chatStorageErrorMessage(e, "Could not create conversation — reload and try again."));
+          toast.error(chatErrorMessage(e));
           return;
         }
       }
 
-      if (detectCrisis(trimmed)) setShowCrisis(true);
-
-      // Cap history at last 10 messages to avoid eating the context window.
-      // The backend also enforces MAX_THREAD_MESSAGES=10, but trimming here
-      // prevents sending a huge payload over the wire.
+      // Build API thread (cap at last 20 messages)
       const historyForApi = buildApiThread(
-        messagesRef.current
-          .filter((m) => m.id !== "greeting")
-          .slice(-10),
+        messagesRef.current.filter((m) => m.id !== "welcome").slice(-20),
       );
       const apiMessages: ChatHistoryItem[] = [...historyForApi, { role: "user", content: trimmed }];
 
@@ -193,6 +215,7 @@ export default function ChatPage() {
       setInput("");
       setIsTyping(true);
 
+      // Persist user message to Supabase
       let userRow;
       try {
         userRow = await insertConversationMessageRow(client, activeConvId, "user", trimmed);
@@ -200,7 +223,7 @@ export default function ChatPage() {
         setMessages((p) => p.filter((m) => m.id !== tempUserId));
         messagesRef.current = messagesRef.current.filter((m) => m.id !== tempUserId);
         setIsTyping(false);
-        toast.error(chatStorageErrorMessage(e, "Could not send message"));
+        toast.error(chatErrorMessage(e));
         return;
       }
 
@@ -219,11 +242,10 @@ export default function ChatPage() {
 
       const aiMsgId = crypto.randomUUID();
       const time = formatMsgTime();
-      const lang = normalizeLanguage(profile?.language ?? undefined);
 
       const saveAssistant = async (body: string) => {
         try {
-          const row = await insertConversationMessageRow(client, activeConvId, "assistant", body);
+          const row = await insertConversationMessageRow(client, activeConvId!, "assistant", body);
           setMessages((msgs) => {
             const next = msgs.map((m) => (m.id === aiMsgId ? { ...m, id: row.id, time: formatMsgTime(row.created_at) } : m));
             messagesRef.current = next;
@@ -231,7 +253,7 @@ export default function ChatPage() {
           });
         } catch (e) {
           console.error(e);
-          toast.error(chatStorageErrorMessage(e, "Reply could not be saved to the cloud"));
+          toast.error("Reply could not be saved — check your connection.");
         }
       };
 
@@ -240,12 +262,11 @@ export default function ChatPage() {
       streamShowRef.current = false;
 
       try {
-        const { fullText, crisis: serverCrisis } = await streamCompanionReply({
+        const { fullText } = await streamProjectReply({
           apiUrl,
           accessToken,
+          projectId,
           messages: apiMessages,
-          companion: companionType,
-          language: lang,
           onDelta: (delta) => {
             setIsTyping(false);
             if (!streamShowRef.current) {
@@ -260,8 +281,6 @@ export default function ChatPage() {
         });
 
         setIsTyping(false);
-        if (serverCrisis) setShowCrisis(true);
-
         streamShowRef.current = false;
         streamBufRef.current = "";
         flushSync(() => {
@@ -283,116 +302,99 @@ export default function ChatPage() {
         flushSync(() => {
           pumpStreamPaint();
         });
-        toast.error(e instanceof Error ? e.message : "AI unavailable — using offline reply");
-
-        const fallback = detectCrisis(trimmed)
-          ? "I hear you, and I'm really glad you told me. You're not alone in this. Please reach out to iCall (9152987821) or KIRAN (1800-599-0019) — they're free, confidential, and available 24/7. I'm here for you too. 💙"
-          : getAIResponseForCompanion(trimmed, companionType);
-
-        setMessages((msgs) => {
-          const merged = [...msgs, { id: aiMsgId, role: "ai" as const, text: fallback, time }];
-          messagesRef.current = merged;
-          return merged;
-        });
-        await saveAssistant(fallback);
+        const errMsg = e instanceof Error ? e.message : "AI unavailable — please try again.";
+        toast.error(errMsg);
       }
     },
-    [chatReady, companionType, profile?.language],
+    [chatReady, projectId, user],
   );
 
   const hasUserMessage = messages.some((m) => m.role === "user");
+  const projectName = project?.name ?? "Agent";
 
   return (
     <div className="fixed inset-0 bg-background flex flex-col z-50">
-      <AnimatePresence>
-        {showCrisis && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="bg-destructive/10 border-b border-destructive/20"
-            role="alert"
-          >
-            <div className="px-4 py-3 flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <p className="text-sm font-medium text-foreground">You're not alone in this</p>
-                <p className="text-xs text-muted-foreground mt-1">Free, confidential help is available 24/7:</p>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  <a
-                    href="tel:9152987821"
-                    className="inline-flex items-center gap-1.5 rounded-full bg-destructive text-destructive-foreground px-3 py-1.5 text-xs font-medium"
-                  >
-                    <Phone className="w-3 h-3" /> iCall: 9152987821
-                  </a>
-                  <a
-                    href="tel:18005990019"
-                    className="inline-flex items-center gap-1.5 rounded-full bg-destructive text-destructive-foreground px-3 py-1.5 text-xs font-medium"
-                  >
-                    <Phone className="w-3 h-3" /> KIRAN: 1800-599-0019
-                  </a>
-                </div>
-              </div>
-              <button type="button" onClick={() => setShowCrisis(false)} className="text-xs text-muted-foreground hover:text-foreground">
-                ✕
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
+      {/* Header */}
       <header className="bg-background/90 backdrop-blur-lg border-b border-border/40 px-4 py-3 flex items-center gap-3">
-        <Link to="/dashboard" className="p-2 rounded-xl hover:bg-secondary transition-colors">
+        <Link to="/projects" className="p-2 rounded-xl hover:bg-secondary transition-colors" id="chat-back-btn">
           <ArrowLeft className="w-4 h-4 text-foreground" />
         </Link>
-        <div className="flex items-center gap-3 flex-1">
-          <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center text-lg">{info.emoji}</div>
-          <div>
-            <p className="text-sm font-semibold text-foreground">{info.name}</p>
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+            <Bot className="w-5 h-5 text-primary" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-foreground truncate">{projectName}</p>
             <p className="text-[10px] text-muted-foreground flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-success inline-block" /> {info.status}
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+              {chatReady ? "Online" : "Connecting…"}
             </p>
           </div>
         </div>
+        <Link
+          to={`/projects/${projectId}/edit`}
+          id="chat-edit-btn"
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded-lg hover:bg-secondary"
+        >
+          Edit
+        </Link>
       </header>
 
+      {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-6 space-y-3">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-            {msg.role === "ai" && (
-              <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center text-sm mr-2 flex-shrink-0 mt-1">
-                {info.emoji}
-              </div>
-            )}
-            <div
-              className={`max-w-[75%] rounded-2xl px-4 py-2.5 ${
-                msg.role === "user" ? "bg-primary text-primary-foreground rounded-br-md" : "bg-secondary text-foreground rounded-bl-md"
-              }`}
+        <AnimatePresence initial={false}>
+          {messages.map((msg) => (
+            <motion.div
+              key={msg.id}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.2 }}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
-              <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
-              <p className={`text-[10px] mt-1 ${msg.role === "user" ? "text-primary-foreground/50" : "text-muted-foreground"}`}>{msg.time}</p>
-            </div>
-          </div>
-        ))}
+              {msg.role === "ai" && (
+                <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center mr-2 flex-shrink-0 mt-1">
+                  <Bot className="w-4 h-4 text-primary" />
+                </div>
+              )}
+              <div
+                className={`max-w-[75%] rounded-2xl px-4 py-2.5 ${
+                  msg.role === "user"
+                    ? "bg-primary text-primary-foreground rounded-br-md"
+                    : "bg-secondary text-foreground rounded-bl-md"
+                }`}
+              >
+                <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{msg.text}</p>
+                <p className={`text-[10px] mt-1 ${msg.role === "user" ? "text-primary-foreground/50" : "text-muted-foreground"}`}>
+                  {msg.time}
+                </p>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+
+        {/* Streaming bubble */}
         {streamShowRef.current && (
           <div className="flex justify-start">
-            <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center text-sm mr-2 flex-shrink-0 mt-1">{info.emoji}</div>
+            <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center mr-2 flex-shrink-0 mt-1">
+              <Bot className="w-4 h-4 text-primary" />
+            </div>
             <div className="max-w-[75%] rounded-2xl rounded-bl-md px-4 py-2.5 bg-secondary text-foreground border border-border/30">
               <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">{streamBufRef.current}</p>
               <p className="text-[10px] mt-1 text-muted-foreground">{streamTimeRef.current}</p>
             </div>
           </div>
         )}
-        {/* streamPaintGen forces re-renders while streaming; keep referenced so React subscribes */}
-        <span className="sr-only" aria-hidden>
-          {streamPaintGen}
-        </span>
+        <span className="sr-only" aria-hidden>{streamPaintGen}</span>
+
+        {/* Typing indicator */}
         {isTyping && (
           <div className="flex justify-start items-end gap-2">
-            <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center text-sm flex-shrink-0">{info.emoji}</div>
+            <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+              <Bot className="w-4 h-4 text-primary" />
+            </div>
             <div className="bg-secondary rounded-2xl rounded-bl-md px-4 py-3 min-w-[8rem] shadow-sm border border-border/40">
               <p className="text-xs text-muted-foreground mb-2 font-medium">
-                {info.name} is typing<span className="inline-block w-6 text-left">…</span>
+                {projectName} is thinking<span className="inline-block w-6 text-left">…</span>
               </p>
               <div className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-primary/60 animate-typing-dot-1" />
@@ -405,6 +407,7 @@ export default function ChatPage() {
         <div ref={bottomRef} />
       </div>
 
+      {/* Quick replies */}
       {!hasUserMessage && (
         <div className="px-4 pb-2 flex gap-2 overflow-x-auto">
           {quickReplies.map((qr) => (
@@ -421,17 +424,12 @@ export default function ChatPage() {
         </div>
       )}
 
+      {/* Input area */}
       <div className="bg-background/90 backdrop-blur-lg border-t border-border/40 px-4 py-3">
         <div className="flex items-end gap-2 max-w-3xl mx-auto">
-          <button
-            type="button"
-            className="p-2.5 rounded-xl text-muted-foreground hover:text-foreground hover:bg-secondary transition-all"
-            aria-label="Voice input"
-          >
-            <Mic className="w-4 h-4" />
-          </button>
           <div className="flex-1 rounded-xl border border-border bg-card px-4 py-2.5 focus-within:border-primary/30 transition-colors">
             <textarea
+              id="chat-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -440,13 +438,14 @@ export default function ChatPage() {
                   void sendMessage(input);
                 }
               }}
-              placeholder="Share what's on your mind…"
+              placeholder="Type a message…"
               rows={1}
               disabled={!chatReady}
               className="w-full bg-transparent text-sm text-foreground placeholder:text-muted-foreground resize-none outline-none max-h-32"
             />
           </div>
           <button
+            id="chat-send-btn"
             type="button"
             onClick={() => void sendMessage(input)}
             disabled={!input.trim() || !chatReady}

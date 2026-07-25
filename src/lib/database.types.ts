@@ -4,32 +4,34 @@ export type ProfileRow = {
   created_at: string;
   updated_at: string | null;
   display_name: string | null;
-  gender: string | null;
-  companion: string | null;
-  language: string | null;
-  concerns: string[] | null;
-  initial_mood: number | null;
-  notifications_enabled: boolean | null;
-  notif_time: string | null;
   anonymous: boolean | null;
-  weekly_report: boolean | null;
   theme: string | null;
-  onboarding_completed: boolean | null;
 };
 
-export type MoodEntryRow = {
+/** A user's AI agent project. */
+export type ProjectRow = {
   id: string;
   user_id: string;
-  mood_level: number;
-  tags: string[] | null;
-  note: string | null;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string | null;
+};
+
+/** A system prompt associated with a project. */
+export type PromptRow = {
+  id: string;
+  project_id: string;
+  content: string;
+  is_active: boolean;
   created_at: string;
 };
 
-/** AI chat (MVP): one row per user thread. */
+/** A conversation thread scoped to a project. */
 export type ConversationRow = {
   id: string;
   user_id: string;
+  project_id: string | null;
   created_at: string;
 };
 

@@ -2,17 +2,15 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/contexts/AuthContext";
 import AuthRoutes from "@/components/AuthRoutes";
 import LandingPage from "./pages/LandingPage";
 import AuthPage from "./pages/AuthPage";
-import OnboardingPage from "./pages/OnboardingPage";
 import DashboardLayout from "./components/DashboardLayout";
-import DashboardPage from "./pages/DashboardPage";
+import ProjectsPage from "./pages/ProjectsPage";
+import CreateEditProjectPage from "./pages/CreateEditProjectPage";
 import ChatPage from "./pages/ChatPage";
-import MoodPage from "./pages/MoodPage";
-import ExercisesPage from "./pages/ExercisesPage";
 import SettingsPage from "./pages/SettingsPage";
 import NotFound from "./pages/NotFound";
 
@@ -29,14 +27,17 @@ const App = () => (
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<AuthPage />} />
             <Route element={<AuthRoutes />}>
-              <Route path="/onboarding" element={<OnboardingPage />} />
-              <Route path="/chat" element={<ChatPage />} />
+              {/* Project-scoped chat (full screen, outside dashboard layout) */}
+              <Route path="/projects/:id/chat" element={<ChatPage />} />
+              {/* Dashboard layout */}
               <Route element={<DashboardLayout />}>
-                <Route path="/dashboard" element={<DashboardPage />} />
-                <Route path="/mood" element={<MoodPage />} />
-                <Route path="/exercises" element={<ExercisesPage />} />
+                <Route path="/projects" element={<ProjectsPage />} />
+                <Route path="/projects/new" element={<CreateEditProjectPage />} />
+                <Route path="/projects/:id/edit" element={<CreateEditProjectPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
-                <Route path="/resources" element={<DashboardPage />} />
+                {/* Legacy redirects */}
+                <Route path="/dashboard" element={<Navigate to="/projects" replace />} />
+                <Route path="/onboarding" element={<Navigate to="/projects" replace />} />
               </Route>
             </Route>
             <Route path="*" element={<NotFound />} />

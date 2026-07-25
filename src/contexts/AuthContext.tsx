@@ -36,7 +36,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setProfile(null);
       const err = toQueryError(e);
       setProfileError(
-        `${err.message} If the table or policies are missing, open Supabase → SQL Editor and run manah-mindful-muse/supabase/setup.sql`,
+        `${err.message} — Open Supabase → SQL Editor and run supabase/setup.sql then supabase/projects-prompts-migration.sql`,
       );
     }
   }, []);
@@ -74,10 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       data: { subscription },
     } = client.auth.onAuthStateChange((event, s) => {
       setSession(s);
-      
       if (s?.user) {
-        // Only trigger a hard reload/loading screen if the user ID actually changed.
-        // A simple token refresh (event === 'TOKEN_REFRESHED' or identical user) should not unmount the app.
         setProfile((prevProfile) => {
           if (prevProfile?.id !== s.user.id) {
             setLoading(true);

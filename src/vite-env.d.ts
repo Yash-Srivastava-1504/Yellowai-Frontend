@@ -3,7 +3,7 @@
 interface ImportMetaEnv {
   readonly VITE_SUPABASE_URL: string;
   readonly VITE_SUPABASE_ANON_KEY: string;
-  /** Manah backend (e.g. http://localhost:3001) — Qubrid/Gemini companion chat */
+  /** AgentForge backend (e.g. http://localhost:3001) — chat stream + projects API */
   readonly VITE_API_URL: string;
 }
 

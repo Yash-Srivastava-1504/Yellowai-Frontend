@@ -1,24 +1,19 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { User, Bell, Shield, ChevronRight, Check, MessageCircle, Trash2, Globe, LogOut } from "lucide-react";
-import { type CompanionType, companions, setStoredCompanion } from "@/lib/companion";
+import { User, Shield, Trash2, LogOut, Loader2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { getSupabase } from "@/lib/supabase";
 import type { ProfileRow } from "@/lib/database.types";
-import { updateProfile, deleteAllUserChats } from "@/lib/userData";
+import { updateProfile, deleteAllUserConversations, toQueryError } from "@/lib/userData";
 
 export default function SettingsPage() {
   const navigate = useNavigate();
   const { user, profile, refreshProfile, signOut } = useAuth();
-  const [name, setName] = useState("Friend");
+  const [displayName, setDisplayName] = useState("User");
   const [anonymous, setAnonymous] = useState(false);
-  const [dailyReminder, setDailyReminder] = useState(true);
-  const [weeklyReport, setWeeklyReport] = useState(true);
-  const [reminderTime, setReminderTime] = useState("evening");
-  const [language, setLanguage] = useState("hinglish");
-  const [selectedCompanion, setSelectedCompanion] = useState<CompanionType>("friend");
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [saving, setSaving] = useState(false);
   const initRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -29,311 +24,181 @@ export default function SettingsPage() {
     if (!profile || !user) return;
     if (initRef.current === user.id) return;
     initRef.current = user.id;
-    setName(profile.display_name || "Friend");
+    setDisplayName(profile.display_name || "User");
     setAnonymous(Boolean(profile.anonymous));
-    setDailyReminder(profile.notifications_enabled !== false);
-    setWeeklyReport(profile.weekly_report !== false);
-    setReminderTime(profile.notif_time || "evening");
-    setLanguage(profile.language || "hinglish");
-    const c = profile.companion as CompanionType | null;
-    setSelectedCompanion(c === "didi" || c === "bhaiya" || c === "friend" ? c : "friend");
   }, [profile, user]);
 
   const persist = useCallback(
     async (patch: Partial<ProfileRow>) => {
       const client = getSupabase();
       if (!client || !user) return;
+      setSaving(true);
       try {
         await updateProfile(client, user.id, patch);
         await refreshProfile();
+        toast.success("Settings saved.");
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Could not save settings");
+        toast.error(toQueryError(e).message || "Could not save settings");
+      } finally {
+        setSaving(false);
       }
     },
     [user, refreshProfile],
   );
 
+  // Debounce display name saves
   useEffect(() => {
     if (!user || initRef.current !== user.id || !profile) return;
     const t = window.setTimeout(() => {
-      if ((profile.display_name || "Friend") === name) return;
-      void persist({ display_name: name });
-    }, 500);
+      if ((profile.display_name || "User") === displayName) return;
+      void persist({ display_name: displayName });
+    }, 800);
     return () => window.clearTimeout(t);
-  }, [name, user, profile, persist]);
+  }, [displayName]);
 
-  const handleCompanionChange = (type: CompanionType) => {
-    setSelectedCompanion(type);
-    setStoredCompanion(type);
-    void persist({ companion: type });
+  const handleAnonymousToggle = (val: boolean) => {
+    setAnonymous(val);
+    void persist({ anonymous: val });
   };
 
-  const Toggle = ({ on, onChange }: { on: boolean; onChange: () => void }) => (
-    <button
-      type="button"
-      onClick={onChange}
-      className={`w-10 h-5.5 rounded-full relative transition-colors duration-200 ${on ? "bg-primary" : "bg-border"}`}
-    >
-      <div
-        className={`w-4 h-4 rounded-full absolute top-[3px] transition-transform duration-200 ${
-          on ? "translate-x-[22px] bg-primary-foreground" : "translate-x-[3px] bg-muted-foreground"
-        }`}
-      />
-    </button>
-  );
-
-  const handleClearChats = async () => {
+  const handleClearHistory = async () => {
     const client = getSupabase();
     if (!client || !user) return;
     try {
-      await deleteAllUserChats(client, user.id);
-      setShowClearConfirm(false);
-      toast.success("Chat history cleared");
+      await deleteAllUserConversations(client, user.id);
+      toast.success("All conversation history cleared.");
+      setShowDeleteConfirm(false);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not clear chats");
+      toast.error(toQueryError(e).message);
     }
   };
 
   const handleSignOut = async () => {
     await signOut();
-    initRef.current = null;
     navigate("/");
   };
 
   return (
-    <div className="max-w-xl mx-auto pb-20 lg:pb-6 space-y-4">
-      <h1 className="text-xl font-bold tracking-tight text-foreground mb-6">Settings</h1>
+    <div className="max-w-2xl mx-auto space-y-5 pb-20 lg:pb-6">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight text-foreground">Settings</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Manage your account and preferences</p>
+      </div>
 
-      <section className="rounded-2xl border border-border/60 bg-card p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <User className="w-4 h-4 text-primary" strokeWidth={1.5} />
+      {/* Profile */}
+      <div className="rounded-2xl border border-border/60 bg-card p-6">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+            <User className="w-4 h-4 text-primary" />
+          </div>
           <h2 className="text-sm font-semibold text-foreground">Profile</h2>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center text-primary text-base font-bold">
-            {(anonymous ? "?" : name).charAt(0).toUpperCase()}
-          </div>
-          <div className="flex-1">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              aria-label="Your name"
-              className="w-full rounded-xl border border-border bg-transparent px-3 py-2 text-sm text-foreground outline-none focus:border-primary/30 transition-colors"
-            />
-          </div>
-        </div>
-      </section>
 
-      <section className="rounded-2xl border border-border/60 bg-card p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Globe className="w-4 h-4 text-primary" strokeWidth={1.5} />
-          <h2 className="text-sm font-semibold text-foreground">Language</h2>
-        </div>
-        <div className="flex gap-2">
-          {[
-            { value: "en", label: "English" },
-            { value: "hi", label: "हिंदी" },
-            { value: "hinglish", label: "Hinglish" },
-          ].map((l) => (
-            <button
-              key={l.value}
-              type="button"
-              onClick={() => {
-                setLanguage(l.value);
-                void persist({ language: l.value });
-              }}
-              className={`flex-1 rounded-xl py-2.5 text-xs font-medium transition-all border ${
-                language === l.value ? "border-primary/30 bg-primary text-primary-foreground" : "border-border text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {l.label}
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-border/60 bg-card p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <MessageCircle className="w-4 h-4 text-primary" strokeWidth={1.5} />
-          <h2 className="text-sm font-semibold text-foreground">Companion</h2>
-        </div>
-        <div className="space-y-2">
-          {(["didi", "bhaiya", "friend"] as CompanionType[]).map((type) => {
-            const c = companions[type];
-            const isSelected = selectedCompanion === type;
-            return (
-              <button
-                key={type}
-                type="button"
-                onClick={() => handleCompanionChange(type)}
-                className={`w-full flex items-center gap-3 rounded-xl p-3 text-left transition-all border ${
-                  isSelected ? "border-primary/30 bg-primary/5" : "border-transparent hover:bg-secondary/30"
-                }`}
-              >
-                <span className="text-xl">{c.emoji}</span>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-foreground">
-                    {c.name} · {c.subtitle}
-                  </p>
-                  <p className="text-xs text-muted-foreground">{c.description}</p>
-                </div>
-                {isSelected && <Check className="w-4 h-4 text-primary" />}
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-border/60 bg-card p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Shield className="w-4 h-4 text-primary" strokeWidth={1.5} />
-          <h2 className="text-sm font-semibold text-foreground">Privacy</h2>
-        </div>
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-foreground">Anonymous Mode</p>
-              <p className="text-xs text-muted-foreground">Hide your name in conversations</p>
-            </div>
-            <Toggle
-              on={anonymous}
-              onChange={() => {
-                const next = !anonymous;
-                setAnonymous(next);
-                void persist({ anonymous: next });
-              }}
+          <div>
+            <label htmlFor="display-name" className="block text-xs font-medium text-muted-foreground mb-1.5">Display Name</label>
+            <input
+              id="display-name"
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="w-full rounded-xl border border-border bg-background px-4 py-2.5 text-sm text-foreground focus:outline-none focus:border-primary/40 transition-colors"
             />
           </div>
-          <div className="border-t border-border/40 pt-4">
-            {showClearConfirm ? (
-              <div className="flex items-center gap-2">
-                <p className="text-xs text-destructive flex-1">Are you sure? This cannot be undone.</p>
+
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1.5">Email</label>
+            <p className="text-sm text-foreground bg-secondary/50 rounded-xl px-4 py-2.5 border border-border/40">
+              {user?.email ?? "—"}
+            </p>
+          </div>
+
+          {/* Anonymous mode */}
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="text-sm font-medium text-foreground">Anonymous mode</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Hide your display name in the UI</p>
+            </div>
+            <button
+              id="anonymous-toggle"
+              type="button"
+              onClick={() => handleAnonymousToggle(!anonymous)}
+              className={`relative w-11 h-6 rounded-full transition-colors ${anonymous ? "bg-primary" : "bg-secondary border border-border"}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${anonymous ? "translate-x-5" : "translate-x-0"}`} />
+            </button>
+          </div>
+
+          {saving && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              Saving…
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Privacy */}
+      <div className="rounded-2xl border border-border/60 bg-card p-6">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+            <Shield className="w-4 h-4 text-primary" />
+          </div>
+          <h2 className="text-sm font-semibold text-foreground">Privacy & Data</h2>
+        </div>
+
+        <div className="space-y-3">
+          {!showDeleteConfirm ? (
+            <button
+              id="clear-history-btn"
+              type="button"
+              onClick={() => setShowDeleteConfirm(true)}
+              className="w-full flex items-center justify-between rounded-xl border border-border/60 px-4 py-3 text-sm text-muted-foreground hover:text-destructive hover:border-destructive/20 hover:bg-destructive/5 transition-all"
+            >
+              <div className="flex items-center gap-2.5">
+                <Trash2 className="w-4 h-4" />
+                Clear all conversation history
+              </div>
+            </button>
+          ) : (
+            <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-4">
+              <p className="text-sm text-foreground mb-3">
+                This will permanently delete <span className="font-semibold">all chat messages</span> across all your agents. This cannot be undone.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  id="confirm-clear-btn"
+                  type="button"
+                  onClick={() => void handleClearHistory()}
+                  className="rounded-xl bg-destructive text-destructive-foreground px-4 py-2 text-xs font-medium hover:opacity-90 transition-opacity"
+                >
+                  Yes, delete everything
+                </button>
                 <button
                   type="button"
-                  onClick={() => setShowClearConfirm(false)}
-                  className="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5 rounded-lg border border-border"
+                  onClick={() => setShowDeleteConfirm(false)}
+                  className="rounded-xl border border-border px-4 py-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
                 >
                   Cancel
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleClearChats()}
-                  className="text-xs text-destructive-foreground bg-destructive hover:opacity-90 px-3 py-1.5 rounded-lg"
-                >
-                  Delete
-                </button>
               </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setShowClearConfirm(true)}
-                className="flex items-center gap-2 text-sm text-destructive hover:text-destructive/80 transition-colors"
-              >
-                <Trash2 className="w-4 h-4" /> Clear all chat history
-              </button>
-            )}
-          </div>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border border-border/60 bg-card p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Bell className="w-4 h-4 text-primary" strokeWidth={1.5} />
-          <h2 className="text-sm font-semibold text-foreground">Notifications</h2>
-        </div>
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-foreground">Daily Check-in</p>
-            <Toggle
-              on={dailyReminder}
-              onChange={() => {
-                const next = !dailyReminder;
-                setDailyReminder(next);
-                void persist({ notifications_enabled: next });
-              }}
-            />
-          </div>
-          {dailyReminder && (
-            <div className="flex gap-1.5 p-1 rounded-xl bg-secondary/50">
-              {[
-                { key: "morning", emoji: "🌅" },
-                { key: "afternoon", emoji: "☀️" },
-                { key: "evening", emoji: "🌙" },
-              ].map((t) => (
-                <button
-                  key={t.key}
-                  type="button"
-                  onClick={() => {
-                    setReminderTime(t.key);
-                    void persist({ notif_time: t.key });
-                  }}
-                  className={`flex-1 rounded-lg py-2 text-xs font-medium capitalize transition-all flex items-center justify-center gap-1 ${
-                    reminderTime === t.key ? "bg-primary text-primary-foreground" : "text-muted-foreground"
-                  }`}
-                >
-                  {t.emoji} {t.key}
-                </button>
-              ))}
             </div>
           )}
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-foreground">Weekly Reports</p>
-            <Toggle
-              on={weeklyReport}
-              onChange={() => {
-                const next = !weeklyReport;
-                setWeeklyReport(next);
-                void persist({ weekly_report: next });
-              }}
-            />
-          </div>
         </div>
-      </section>
+      </div>
 
-      <button
-        type="button"
-        onClick={() => void handleSignOut()}
-        className="w-full flex items-center justify-center gap-2 rounded-2xl border border-border py-3 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-secondary/30 transition-colors"
-      >
-        <LogOut className="w-4 h-4" />
-        Log out
-      </button>
-
-      <section className="rounded-2xl border border-primary/20 bg-primary/5 p-5">
-        <h2 className="text-sm font-semibold text-foreground mb-3">✨ Premium</h2>
-        <ul className="space-y-1.5 text-sm text-muted-foreground mb-4">
-          <li className="flex items-center gap-2">
-            <Check className="w-3.5 h-3.5 text-primary" /> Unlimited AI chats
-          </li>
-          <li className="flex items-center gap-2">
-            <Check className="w-3.5 h-3.5 text-primary" /> Voice conversations
-          </li>
-          <li className="flex items-center gap-2">
-            <Check className="w-3.5 h-3.5 text-primary" /> Advanced analytics
-          </li>
-        </ul>
-        <p className="text-sm font-semibold text-foreground mb-4">₹149/mo · ₹999/yr</p>
+      {/* Sign out */}
+      <div className="rounded-2xl border border-border/60 bg-card p-6">
         <button
+          id="sign-out-btn"
           type="button"
-          className="w-full rounded-full bg-primary text-primary-foreground py-2.5 text-sm font-medium hover:opacity-90 transition-all shadow-lg shadow-primary/20"
+          onClick={() => void handleSignOut()}
+          className="w-full flex items-center gap-3 rounded-xl border border-border/60 px-4 py-3 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-all"
         >
-          Upgrade
+          <LogOut className="w-4 h-4" />
+          Sign out
         </button>
-      </section>
-
-      <section className="rounded-2xl border border-border/60 bg-card divide-y divide-border/40">
-        {["Privacy Policy", "Terms of Service", "Contact Support"].map((item) => (
-          <button
-            key={item}
-            type="button"
-            className="w-full flex items-center justify-between px-5 py-3.5 text-sm text-foreground hover:bg-secondary/30 transition-colors"
-          >
-            {item} <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
-          </button>
-        ))}
-      </section>
-
-      <p className="text-center text-[10px] text-muted-foreground font-mono pt-1">Manah v1.0.0 · Made with 💙 in India</p>
+      </div>
     </div>
   );
 }

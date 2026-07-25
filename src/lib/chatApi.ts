@@ -1,32 +1,31 @@
 export type ChatHistoryItem = { role: "user" | "assistant"; content: string };
 
-export type StreamCompanionParams = {
+export type StreamProjectParams = {
   apiUrl: string;
   accessToken: string;
-  /** Full OpenAI-style thread, last item must be role "user" (matches Supabase order). */
+  projectId: string;
+  /** Full OpenAI-style thread, last item must be role "user". */
   messages: ChatHistoryItem[];
-  companion: string;
-  language: string;
   onDelta: (chunk: string) => void;
   signal?: AbortSignal;
 };
 
-export type StreamCompanionResult = { fullText: string; crisis: boolean };
+export type StreamProjectResult = { fullText: string };
 
 /**
- * POST /api/companion/chat — SSE stream (server-side LLM). Keys never touch the browser.
+ * POST /api/chat/stream — SSE stream for a project chat.
+ * The LLM API key never touches the browser.
  */
-export async function streamCompanionReply({
+export async function streamProjectReply({
   apiUrl,
   accessToken,
+  projectId,
   messages,
-  companion,
-  language,
   onDelta,
   signal,
-}: StreamCompanionParams): Promise<StreamCompanionResult> {
+}: StreamProjectParams): Promise<StreamProjectResult> {
   const base = apiUrl.replace(/\/$/, "");
-  const url = `${base}/api/companion/chat`;
+  const url = `${base}/api/chat/stream`;
 
   const res = await fetch(url, {
     method: "POST",
@@ -36,7 +35,7 @@ export async function streamCompanionReply({
       Authorization: `Bearer ${accessToken}`,
       Accept: "text/event-stream",
     },
-    body: JSON.stringify({ messages, companion, language }),
+    body: JSON.stringify({ project_id: projectId, messages }),
     signal,
   });
 
@@ -57,6 +56,9 @@ export async function streamCompanionReply({
           : "Backend could not verify your session. Check Supabase JWT / JWKS and restart the API server.";
       throw new Error(`${detail}${detail ? " — " : ""}${hint}`);
     }
+    if (res.status === 403) {
+      throw new Error("Access denied — this project does not belong to your account.");
+    }
     throw new Error(detail || `Request failed (${res.status})`);
   }
 
@@ -68,7 +70,6 @@ export async function streamCompanionReply({
   const decoder = new TextDecoder();
   let buffer = "";
   let fullText = "";
-  let crisis = false;
   let finished = false;
 
   const handleEventData = (jsonStr: string) => {
@@ -76,13 +77,6 @@ export async function streamCompanionReply({
     try {
       data = JSON.parse(jsonStr) as Record<string, unknown>;
     } catch {
-      return;
-    }
-    if (data.crisis === true && typeof data.reply === "string") {
-      crisis = true;
-      fullText = data.reply;
-      onDelta(data.reply);
-      finished = true;
       return;
     }
     if (typeof data.error === "string") {
@@ -133,7 +127,7 @@ export async function streamCompanionReply({
     await reader.cancel().catch(() => {});
   }
 
-  return { fullText, crisis };
+  return { fullText };
 }
 
 export function getApiBaseUrl(): string | null {

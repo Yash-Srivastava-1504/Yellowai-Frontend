@@ -4,7 +4,7 @@ import { getSupabaseApiSettingsUrl, getSupabaseProjectRef, getSupabaseSqlEditorU
 
 export default function AuthRoutes() {
   const { configured, session, profile, profileError, loading } = useAuth();
-  const loc = useLocation();
+  const loc = useLocation(); // kept for the /login redirect state
 
   if (!configured) {
     return <Navigate to="/" replace state={{ reason: "no_supabase" }} />;
@@ -89,13 +89,6 @@ export default function AuthRoutes() {
     );
   }
 
-  if (!profile.onboarding_completed && loc.pathname !== "/onboarding") {
-    return <Navigate to="/onboarding" replace />;
-  }
-
-  if (profile.onboarding_completed && loc.pathname === "/onboarding") {
-    return <Navigate to="/dashboard" replace />;
-  }
 
   return <Outlet />;
 }

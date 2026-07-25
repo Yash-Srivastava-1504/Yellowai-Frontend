@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { ConversationMessageRow, ConversationRow, MoodEntryRow, ProfileRow } from "./database.types";
+import type { ConversationMessageRow, ConversationRow, ProfileRow, ProjectRow, PromptRow } from "./database.types";
 
-/** PostgREST errors are plain objects — normalize so the UI shows the real reason (RLS, missing table, etc.). */
+/** PostgREST errors — normalize so the UI shows the real reason (RLS, missing table, etc.). */
 export function toQueryError(e: unknown): Error {
   if (e instanceof Error) return e;
   if (e && typeof e === "object" && "message" in e) {
@@ -12,6 +12,8 @@ export function toQueryError(e: unknown): Error {
   return new Error(String(e));
 }
 
+// ── Profile ────────────────────────────────────────────────────────────────────
+
 export async function fetchOrCreateProfile(
   client: SupabaseClient,
   userId: string,
@@ -20,7 +22,11 @@ export async function fetchOrCreateProfile(
   const { data: existing, error: e1 } = await client.from("profiles").select("*").eq("id", userId).maybeSingle();
   if (e1) throw toQueryError(e1);
   if (existing) return existing as ProfileRow;
-  const { data: inserted, error: e2 } = await client.from("profiles").insert({ id: userId, email: email ?? null }).select("*").single();
+  const { data: inserted, error: e2 } = await client
+    .from("profiles")
+    .insert({ id: userId, email: email ?? null })
+    .select("*")
+    .single();
   if (e2) throw toQueryError(e2);
   return inserted as ProfileRow;
 }
@@ -30,51 +36,123 @@ export async function updateProfile(client: SupabaseClient, userId: string, patc
   if (error) throw error;
 }
 
-export async function insertMoodEntry(
-  client: SupabaseClient,
-  userId: string,
-  moodLevel: number,
-  tags: string[],
-  note: string,
-): Promise<MoodEntryRow> {
-  const { data, error } = await client
-    .from("mood_entries")
-    .insert({ user_id: userId, mood_level: moodLevel, tags, note: note || "" })
-    .select("*")
-    .single();
-  if (error) throw error;
-  return data as MoodEntryRow;
-}
+// ── Projects ───────────────────────────────────────────────────────────────────
 
-export async function fetchMoodEntriesSince(client: SupabaseClient, userId: string, sinceIso: string): Promise<MoodEntryRow[]> {
+export async function fetchProjects(client: SupabaseClient, userId: string): Promise<ProjectRow[]> {
   const { data, error } = await client
-    .from("mood_entries")
+    .from("projects")
     .select("*")
     .eq("user_id", userId)
-    .gte("created_at", sinceIso)
     .order("created_at", { ascending: false });
-  if (error) throw error;
-  return (data ?? []) as MoodEntryRow[];
+  if (error) throw toQueryError(error);
+  return (data ?? []) as ProjectRow[];
 }
 
-/** Latest conversation for user, or a new row (MVP: one active thread). */
-export async function getLatestOrCreateConversation(client: SupabaseClient, userId: string): Promise<ConversationRow> {
+export async function fetchProject(client: SupabaseClient, projectId: string): Promise<ProjectRow | null> {
+  const { data, error } = await client.from("projects").select("*").eq("id", projectId).maybeSingle();
+  if (error) throw toQueryError(error);
+  return data as ProjectRow | null;
+}
+
+export async function createProject(
+  client: SupabaseClient,
+  userId: string,
+  name: string,
+  description: string,
+): Promise<ProjectRow> {
+  const { data, error } = await client
+    .from("projects")
+    .insert({ user_id: userId, name: name.trim(), description: description.trim() })
+    .select("*")
+    .single();
+  if (error) throw toQueryError(error);
+  return data as ProjectRow;
+}
+
+export async function updateProject(
+  client: SupabaseClient,
+  projectId: string,
+  patch: { name?: string; description?: string },
+): Promise<ProjectRow> {
+  const { data, error } = await client
+    .from("projects")
+    .update(patch)
+    .eq("id", projectId)
+    .select("*")
+    .single();
+  if (error) throw toQueryError(error);
+  return data as ProjectRow;
+}
+
+export async function deleteProject(client: SupabaseClient, projectId: string): Promise<void> {
+  const { error } = await client.from("projects").delete().eq("id", projectId);
+  if (error) throw toQueryError(error);
+}
+
+// ── Prompts ────────────────────────────────────────────────────────────────────
+
+export async function fetchActivePrompt(client: SupabaseClient, projectId: string): Promise<PromptRow | null> {
+  const { data, error } = await client
+    .from("prompts")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("is_active", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw toQueryError(error);
+  return data as PromptRow | null;
+}
+
+export async function setProjectPrompt(
+  client: SupabaseClient,
+  projectId: string,
+  content: string,
+): Promise<PromptRow> {
+  // Deactivate existing active prompts
+  await client.from("prompts").update({ is_active: false }).eq("project_id", projectId).eq("is_active", true);
+  // Insert new active prompt
+  const { data, error } = await client
+    .from("prompts")
+    .insert({ project_id: projectId, content: content.trim(), is_active: true })
+    .select("*")
+    .single();
+  if (error) throw toQueryError(error);
+  return data as PromptRow;
+}
+
+// ── Conversations ──────────────────────────────────────────────────────────────
+
+/** Get the latest conversation for a project, or create one if none exists. */
+export async function getOrCreateProjectConversation(
+  client: SupabaseClient,
+  userId: string,
+  projectId: string,
+): Promise<ConversationRow> {
   const { data: latest, error: e1 } = await client
     .from("conversations")
     .select("*")
     .eq("user_id", userId)
+    .eq("project_id", projectId)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (e1) throw toQueryError(e1);
   if (latest) return latest as ConversationRow;
-  const { data: created, error: e2 } = await client.from("conversations").insert({ user_id: userId }).select("*").single();
+  const { data: created, error: e2 } = await client
+    .from("conversations")
+    .insert({ user_id: userId, project_id: projectId })
+    .select("*")
+    .single();
   if (e2) throw toQueryError(e2);
   return created as ConversationRow;
 }
 
 /** Messages oldest → newest (for UI + API history). */
-export async function fetchConversationMessagesAsc(client: SupabaseClient, conversationId: string): Promise<ConversationMessageRow[]> {
+export async function fetchConversationMessagesAsc(
+  client: SupabaseClient,
+  conversationId: string,
+): Promise<ConversationMessageRow[]> {
   const { data, error } = await client
     .from("messages")
     .select("*")
@@ -99,13 +177,14 @@ export async function insertConversationMessageRow(
   return data as ConversationMessageRow;
 }
 
-/** Clears all conversations (and messages via FK) for Settings / privacy. */
-export async function deleteAllUserConversations(client: SupabaseClient, userId: string) {
-  const { error } = await client.from("conversations").delete().eq("user_id", userId);
+/** Delete all conversations (and messages via FK cascade) for a project. */
+export async function deleteProjectConversations(client: SupabaseClient, projectId: string) {
+  const { error } = await client.from("conversations").delete().eq("project_id", projectId);
   if (error) throw toQueryError(error);
 }
 
-/** @deprecated Use deleteAllUserConversations — alias for settings UI. */
-export async function deleteAllUserChats(client: SupabaseClient, userId: string) {
-  return deleteAllUserConversations(client, userId);
+/** Delete all conversations across all projects for a user (privacy/settings). */
+export async function deleteAllUserConversations(client: SupabaseClient, userId: string) {
+  const { error } = await client.from("conversations").delete().eq("user_id", userId);
+  if (error) throw toQueryError(error);
 }
