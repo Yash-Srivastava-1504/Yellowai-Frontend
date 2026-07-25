@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, Bot, Loader2, Save } from "lucide-react";
+import { ArrowLeft, Bot, Loader2, Save, FileUp, Trash2, FileText } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -16,6 +16,7 @@ import {
   updateProject,
   toQueryError,
 } from "@/lib/userData";
+import { fetchProjectFiles, uploadProjectFile, deleteProjectFile, type ProjectFileRow } from "@/lib/filesApi";
 
 const schema = z.object({
   name: z.string().min(1, "Name is required").max(120, "Name too long"),
@@ -28,10 +29,13 @@ type FormValues = z.infer<typeof schema>;
 export default function CreateEditProjectPage() {
   const { id: projectId } = useParams<{ id: string }>();
   const isEditing = Boolean(projectId);
-  const { user } = useAuth();
+  const { user, session } = useAuth();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(isEditing);
   const [saving, setSaving] = useState(false);
+  const [files, setFiles] = useState<ProjectFileRow[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [uploadingFile, setUploadingFile] = useState(false);
 
   const {
     register,
@@ -58,13 +62,20 @@ export default function CreateEditProjectPage() {
           description: project.description ?? "",
           systemPrompt: prompt?.content ?? "",
         });
+        
+        // Fetch files if session is available
+        if (session?.access_token) {
+          fetchProjectFiles(projectId, session.access_token)
+            .then(setFiles)
+            .catch((e) => console.error("Failed to load files:", e));
+        }
       })
       .catch((e) => {
         toast.error(toQueryError(e).message);
         navigate("/projects");
       })
       .finally(() => setLoading(false));
-  }, [isEditing, projectId, user, reset, navigate]);
+  }, [isEditing, projectId, user, session, reset, navigate]);
 
   const onSubmit = async (values: FormValues) => {
     if (!user) return;
@@ -87,6 +98,20 @@ export default function CreateEditProjectPage() {
         if (values.systemPrompt?.trim()) {
           await setProjectPrompt(client, project.id, values.systemPrompt);
         }
+        
+        if (pendingFiles.length > 0 && session?.access_token) {
+          toast.loading("Uploading files...", { id: "upload-toast" });
+          for (const file of pendingFiles) {
+            try {
+              await uploadProjectFile(project.id, file, session.access_token);
+            } catch (err) {
+              console.error(err);
+              toast.error(`Failed to upload ${file.name}`);
+            }
+          }
+          toast.success("Files uploaded!", { id: "upload-toast" });
+        }
+        
         toast.success("Agent created!");
         navigate(`/projects/${project.id}/chat`);
         return;
@@ -97,6 +122,51 @@ export default function CreateEditProjectPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    // If we're creating a new project, just queue the file locally
+    if (!isEditing) {
+      setPendingFiles((prev) => [...prev, file]);
+      toast.success("File added to queue");
+      e.target.value = "";
+      return;
+    }
+    
+    if (!projectId || !session?.access_token) return;
+    
+    // Clear the input so the same file can be uploaded again if it fails
+    e.target.value = "";
+    
+    setUploadingFile(true);
+    const toastId = toast.loading(`Uploading ${file.name}...`);
+    try {
+      const newFile = await uploadProjectFile(projectId, file, session.access_token);
+      setFiles((prev) => [newFile, ...prev]);
+      toast.success("File uploaded successfully", { id: toastId });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to upload file", { id: toastId });
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
+  const handleDeleteFile = async (fileId: string) => {
+    if (!projectId || !session?.access_token) return;
+    try {
+      await deleteProjectFile(projectId, fileId, session.access_token);
+      setFiles((prev) => prev.filter((f) => f.id !== fileId));
+      toast.success("File deleted");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete file");
+    }
+  };
+
+  const handleRemovePendingFile = (indexToRemove: number) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== indexToRemove));
   };
 
   if (loading) {
@@ -185,6 +255,104 @@ export default function CreateEditProjectPage() {
               className="w-full rounded-xl border border-border bg-background px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40 transition-colors resize-none font-mono leading-relaxed"
             />
             {errors.systemPrompt && <p className="mt-1.5 text-xs text-destructive">{errors.systemPrompt.message}</p>}
+          </div>
+
+          {/* Files / Knowledge Base */}
+          <div className="rounded-2xl border border-border/60 bg-card p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-sm font-medium text-foreground">Knowledge Base</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Upload documents (PDF, TXT, CSV) to give your agent custom knowledge.
+                </p>
+              </div>
+              <div>
+                <input
+                  type="file"
+                  id="file-upload"
+                  className="hidden"
+                  onChange={handleFileUpload}
+                  disabled={uploadingFile}
+                  accept=".txt,.pdf,.csv,.md"
+                />
+                <label
+                  htmlFor="file-upload"
+                  className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-secondary/50 cursor-pointer transition-colors disabled:opacity-50"
+                >
+                  {uploadingFile ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <FileUp className="w-3.5 h-3.5" />
+                  )}
+                  {isEditing ? "Upload File" : "Add File"}
+                </label>
+              </div>
+            </div>
+
+            {files.length > 0 || pendingFiles.length > 0 ? (
+              <div className="space-y-2 mt-4">
+                {/* Uploaded Files */}
+                {files.map((file) => (
+                  <div
+                    key={file.id}
+                    className="flex items-center justify-between p-3 rounded-xl border border-border/50 bg-background"
+                  >
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div className="p-2 rounded-lg bg-primary/10">
+                        <FileText className="w-4 h-4 text-primary" />
+                      </div>
+                      <div className="truncate">
+                        <p className="text-sm font-medium text-foreground truncate">{file.file_name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(file.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteFile(file.id)}
+                      className="p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                      title="Delete file"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+                
+                {/* Pending Files (New Agent) */}
+                {pendingFiles.map((file, i) => (
+                  <div
+                    key={`pending-${i}`}
+                    className="flex items-center justify-between p-3 rounded-xl border border-border/50 bg-background opacity-80"
+                  >
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div className="p-2 rounded-lg bg-secondary/50">
+                        <FileText className="w-4 h-4 text-muted-foreground" />
+                      </div>
+                      <div className="truncate">
+                        <p className="text-sm font-medium text-foreground truncate">{file.name}</p>
+                        <p className="text-xs text-muted-foreground">
+                          Pending upload...
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRemovePendingFile(i)}
+                      className="p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                      title="Remove file"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-4 flex flex-col items-center justify-center py-6 text-center border border-dashed border-border/60 rounded-xl bg-background/50">
+                <FileText className="w-6 h-6 text-muted-foreground mb-2 opacity-50" />
+                <p className="text-sm text-muted-foreground">No files added yet.</p>
+              </div>
+            )}
           </div>
 
           {/* Actions */}
